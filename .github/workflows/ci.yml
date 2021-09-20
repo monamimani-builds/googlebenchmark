@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on:  windows-2019
+
+    strategy:
+      fail-fast: false
+      matrix:
+        BuidType: [RelWithDebInfo]
+
+    env:
+      ArtifactName: GoogleBenchmark${{ matrix.BuidType }}
+
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v2
+        with:
+          submodules: recursive
+
+      - name: Cmake generate
+        run: |
+        
+          $vswherePath="${Env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+
+          $installDir = & $vswherePath -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+
+          $vcvarallPath = join-path $installDir 'VC\Auxiliary\Build\vcvarsall.bat'
+
+          if(!(test-path $vcvarallPath)) {
+            exit /b 2
+          }
+
+          cmd.exe /c " `"$vcvarallPath`" x64 && set" | foreach {
+            # if the line is a session variable
+            if( $_ -match "=" )
+            {
+              $pair = $_.split("=");
+              # Set the environment variable for the current PowerShell session
+              Set-Item -Force -Path "ENV:\$($pair[0])" -Value "$($pair[1])"
+            }
+          }
+
+          cmake -S benchmark -Wno-dev -B _build -DCMAKE_INSTALL_PREFIX=_install -DBENCHMARK_ENABLE_GTEST_TESTS=FALSE -DBENCHMARK_ENABLE_TESTING=FALSE -DCMAKE_BUILD_TYPE="RelWithDebInfo" -DBUILD_SHARED_LIBS=TRUE -DMSVC_TOOLSET_VERSION=142 -G Ninja         
+          cmake --build ./_build --config "RelWithDebInfo" --clean-first
+          cmake --install ./_build --config "RelWithDebInfo"
+          
+          Get-ChildItem -Recurse -Depth 1
+          
+
+      - name: Upload
+        uses: actions/upload-artifact@v1
+        with:
+          path: ${{ github.workspace }}\_install
+          name: ${{ env.ArtifactName }}
+
+  release:
+    if: contains(github.ref, 'tags/v')
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+      - name: Create Release
+        id: CreateRelease
+        uses: actions/create-release@v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: false
+          prerelease: false
+          
+      - name: Download artifact
+        uses: actions/download-artifact@v1
+        with:
+          name: GoogleBenchmarkRelWithDebInfo
+          path: ./GoogleBenchmarkRelWithDebInfo
+          
+      - name: Assemble Release
+        run: |
+          find "${{ github.workspace }}" -maxdepth 2 -type d -ls
+          
+          mkdir ./Release
+          mkdir ./Release/lib
+          mkdir ./Release/bin
+          
+          cp -R GoogleBenchmarkRelWithDebInfo/include ./Release/include
+          
+          cp -R GoogleBenchmarkRelWithDebInfo/lib ./Release/lib/RelWithDebInfo
+          
+          cp -R GoogleBenchmarkRelWithDebInfo/bin/ ./Release/bin/RelWithDebInfo
+          
+          pushd ./Release
+          zip -r ${{ github.workspace }}/GoogleBenchmark.zip .
+          popd
+
+      - name: Upload to Release
+        id: upload_to_release
+        uses: actions/upload-release-asset@v1.0.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.CreateRelease.outputs.upload_url }}
+          asset_path: ./GoogleBenchmark.zip
+          asset_name: GoogleBenchmark.zip
+          asset_content_type: application/zip
+
